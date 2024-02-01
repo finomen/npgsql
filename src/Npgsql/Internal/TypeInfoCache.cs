@@ -15,7 +15,7 @@ sealed class TypeInfoCache<TPgTypeId> where TPgTypeId : struct
 
     // Used for reading, occasionally for parameter writing where a db type was given.
     // 8ns, about 10ns total to scan an array with 6, 7 different clr types under one pg type
-    readonly ConcurrentDictionary<TPgTypeId, (Type? Type, PgTypeInfo? Info)[]> _cacheByPgTypeId = new();
+    readonly ConcurrentDictionary<TPgTypeId, (Type? Type, PgTypeInfo Info)[]> _cacheByPgTypeId = new();
 
     static TypeInfoCache()
     {
@@ -52,12 +52,12 @@ sealed class TypeInfoCache<TPgTypeId> where TPgTypeId : struct
 
         return null;
 
-        PgTypeInfo? FindMatch(Type? type, (Type? Type, PgTypeInfo? Info)[] infos)
+        PgTypeInfo? FindMatch(Type? type, (Type? Type, PgTypeInfo Info)[] infos)
         {
             for (var i = 0; i < infos.Length; i++)
             {
                 ref var item = ref infos[i];
-                if (item.Type == type && item.Info is not null)
+                if (item.Type == type)
                     return item.Info;
             }
 
@@ -76,17 +76,17 @@ sealed class TypeInfoCache<TPgTypeId> where TPgTypeId : struct
                     : _cacheByClrType[type];
         }
 
-        PgTypeInfo? AddEntryById(Type? type, TPgTypeId pgTypeId, (Type? Type, PgTypeInfo? Info)[]? infos)
+        PgTypeInfo? AddEntryById(Type? type, TPgTypeId pgTypeId, (Type? Type, PgTypeInfo Info)[]? infos)
         {
-            // We cache negatives (null info) to allow 'object or default' checks to never hit the resolvers after the first lookup.
-            var info = CreateInfo(type, pgTypeId, _options, _validatePgTypeIds);
+            if (CreateInfo(type, pgTypeId, _options, _validatePgTypeIds) is not { } info)
+                return null;
 
-            var isDefaultInfo = type is null && info is not null;
+            var isDefaultInfo = type is null;
             if (infos is null)
             {
                 // Also add defaults by their info type to save a future resolver lookup + resize.
                 infos = isDefaultInfo
-                    ? new [] { (type, info), (info!.Type, info) }
+                    ? new [] { (type, info), (info.Type, info) }
                     : new [] { (type, info) };
 
                 if (_cacheByPgTypeId.TryAdd(pgTypeId, infos))
@@ -106,13 +106,13 @@ sealed class TypeInfoCache<TPgTypeId> where TPgTypeId : struct
                 if (isDefaultInfo)
                 {
                     foreach (var oldInfo in oldInfos)
-                        if (oldInfo.Type == info!.Type)
+                        if (oldInfo.Type == info.Type)
                             hasExactType = true;
                 }
                 Array.Resize(ref infos, oldInfos.Length + (isDefaultInfo && !hasExactType ? 2 : 1));
                 infos[oldInfos.Length] = (type, info);
                 if (isDefaultInfo && !hasExactType)
-                    infos[oldInfos.Length + 1] = (info!.Type, info);
+                    infos[oldInfos.Length + 1] = (info.Type, info);
 
                 if (_cacheByPgTypeId.TryUpdate(pgTypeId, infos, oldInfos))
                     return info;
