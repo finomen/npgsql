@@ -319,6 +319,9 @@ ORDER BY oid{(withEnumSortOrder ? ", enumsortorder" : "")};";
         // Then load the types
         Expect<RowDescriptionMessage>(await conn.ReadMessage(async).ConfigureAwait(false), conn);
         IBackendMessage msg;
+
+        List<Func<bool>> deferred = new List<Func<bool>>();
+
         while (true)
         {
             msg = await conn.ReadMessage(async).ConfigureAwait(false);
@@ -344,52 +347,79 @@ ORDER BY oid{(withEnumSortOrder ? ", enumsortorder" : "")};";
 
             case 'a': // Array
             {
-                Debug.Assert(elemtypoid > 0);
-                if (!byOID.TryGetValue(elemtypoid, out var elementPostgresType))
+                var processA = () =>
                 {
-                    _connectionLogger.LogTrace("Array type '{ArrayTypeName}' refers to unknown element with OID {ElementTypeOID}, skipping",
-                        typname, elemtypoid);
-                    continue;
-                }
+                    Debug.Assert(elemtypoid > 0);
+                    if (!byOID.TryGetValue(elemtypoid, out var elementPostgresType))
+                    {
+                        _connectionLogger.LogTrace(
+                            "Array type '{ArrayTypeName}' refers to unknown element with OID {ElementTypeOID}, skipping",
+                            typname, elemtypoid);
+                        return false;
+                    }
 
-                var arrayType = new PostgresArrayType(nspname, typname, oid, elementPostgresType);
-                byOID[arrayType.OID] = arrayType;
+                    var arrayType = new PostgresArrayType(nspname, typname, oid, elementPostgresType);
+                    byOID[arrayType.OID] = arrayType;
+                    return true;
+                };
+                if (!processA())
+                {
+                    deferred.Add(processA);
+                }
                 continue;
             }
 
             case 'r': // Range
             {
-                Debug.Assert(elemtypoid > 0);
-                if (!byOID.TryGetValue(elemtypoid, out var subtypePostgresType))
+                var processR = () =>
                 {
-                    _connectionLogger.LogTrace("Range type '{RangeTypeName}' refers to unknown subtype with OID {ElementTypeOID}, skipping",
-                        typname, elemtypoid);
-                    continue;
-                }
+                    Debug.Assert(elemtypoid > 0);
+                    if (!byOID.TryGetValue(elemtypoid, out var subtypePostgresType))
+                    {
+                        _connectionLogger.LogTrace(
+                            "Range type '{RangeTypeName}' refers to unknown subtype with OID {ElementTypeOID}, skipping",
+                            typname, elemtypoid);
+                        return false;
+                    }
 
-                var rangeType = new PostgresRangeType(nspname, typname, oid, subtypePostgresType);
-                byOID[rangeType.OID] = rangeType;
+                    var rangeType = new PostgresRangeType(nspname, typname, oid, subtypePostgresType);
+                    byOID[rangeType.OID] = rangeType;
+                    return true;
+                };
+                if (!processR())
+                {
+                    deferred.Add(processR);
+                }
                 continue;
             }
 
             case 'm': // Multirange
-                Debug.Assert(elemtypoid > 0);
-                if (!byOID.TryGetValue(elemtypoid, out var type))
+                var processM = () =>
                 {
-                    _connectionLogger.LogTrace("Multirange type '{MultirangeTypeName}' refers to unknown range with OID {ElementTypeOID}, skipping",
-                        typname, elemtypoid);
-                    continue;
-                }
+                    Debug.Assert(elemtypoid > 0);
+                    if (!byOID.TryGetValue(elemtypoid, out var type))
+                    {
+                        _connectionLogger.LogTrace(
+                            "Multirange type '{MultirangeTypeName}' refers to unknown range with OID {ElementTypeOID}, skipping",
+                            typname, elemtypoid);
+                        return false;
+                    }
 
-                if (type is not PostgresRangeType rangePostgresType)
+                    if (type is not PostgresRangeType rangePostgresType)
+                    {
+                        _connectionLogger.LogTrace("Multirange type '{MultirangeTypeName}' refers to non-range type '{TypeName}', skipping",
+                            typname, type.Name);
+                        return false;
+                    }
+
+                    var multirangeType = new PostgresMultirangeType(nspname, typname, oid, rangePostgresType);
+                    byOID[multirangeType.OID] = multirangeType;
+                    return true;
+                };
+                if (!processM())
                 {
-                    _connectionLogger.LogTrace("Multirange type '{MultirangeTypeName}' refers to non-range type '{TypeName}', skipping",
-                        typname, type.Name);
-                    continue;
+                    deferred.Add(processM);
                 }
-
-                var multirangeType = new PostgresMultirangeType(nspname, typname, oid, rangePostgresType);
-                byOID[multirangeType.OID] = multirangeType;
                 continue;
 
             case 'e': // Enum
@@ -422,6 +452,33 @@ ORDER BY oid{(withEnumSortOrder ? ", enumsortorder" : "")};";
                 throw new ArgumentOutOfRangeException($"Unknown typtype for type '{typname}' in pg_type: {typtype}");
             }
         }
+
+        var newPending = new List<Func<bool>>();
+
+        while (true)
+        {
+            foreach (var p in deferred)
+            {
+                if (!p.Invoke())
+                {
+                    newPending.Add((p));
+                }
+            }
+
+            if (newPending.Count == 0)
+            {
+                break;
+            }
+
+            if (newPending.Count == deferred.Count)
+            {
+                _connectionLogger.LogError("Unable to resolve types");
+            }
+
+            deferred = newPending;
+            newPending = new List<Func<bool>>();
+        }
+
         Expect<CommandCompleteMessage>(msg, conn);
         if (isReplicationConnection)
             Expect<ReadyForQueryMessage>(await conn.ReadMessage(async).ConfigureAwait(false), conn);

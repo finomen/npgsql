@@ -75,11 +75,18 @@ sealed class UnmappedTypeInfoResolverFactory : PgTypeInfoResolverFactory
                 || options.DatabaseInfo.GetPostgresType(dataTypeName) is not PostgresRangeType rangeType)
                 return null;
 
+            var subType = rangeType.Subtype;
+            var domainSubType = subType as PostgresDomainType;
+            if (domainSubType is not null)
+            {
+                subType = domainSubType.BaseType;
+            }
+
             var subInfo =
                 matchedType is null
                     ? options.GetDefaultTypeInfo(rangeType.Subtype)
                     // Input matchedType here as we don't want an NpgsqlRange over Nullable<T> (it has its own nullability tracking, for better or worse)
-                    : options.GetTypeInfo(matchedType == typeof(object) ? matchedType : matchedType.GetGenericArguments()[0], rangeType.Subtype);
+                    : options.GetTypeInfo(matchedType == typeof(object) ? matchedType : matchedType.GetGenericArguments()[0], subType);
 
             // We have no generic RangeConverterResolver so we would not know how to compose a range mapping for such infos.
             // See https://github.com/npgsql/npgsql/issues/5268
